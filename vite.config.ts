@@ -12,6 +12,10 @@ export default defineConfig(({ mode }) => ({
         target: 'http://localhost:4000',
         changeOrigin: true,
       },
+      '/auth': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
     },
   },
   plugins: [react()].filter(Boolean),

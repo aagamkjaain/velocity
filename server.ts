@@ -121,6 +121,24 @@ if (!isMicrosoftConfigReady) {
   console.warn("[Microsoft 365] Configuration incomplete:", { clientId: !!CLIENT_ID, clientSecret: !!CLIENT_SECRET })
 }
 
+const extractDescription = (desc: any): string => {
+  if (!desc) return ""
+  if (typeof desc === "string") return desc
+  if (Array.isArray(desc)) return desc.join(" ")
+  if (desc.content) {
+    const parts: string[] = []
+    const walk = (nodes: any[]): void => {
+      nodes.forEach((node: any) => {
+        if (node.text) parts.push(node.text)
+        if (node.content) walk(node.content)
+      })
+    }
+    walk(desc.content)
+    return parts.join(" ").trim()
+  }
+  return ""
+}
+
 // Auth functions
 function generatePKCE(): PKCE {
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
@@ -334,28 +352,6 @@ app.get('/auth/status', (req: Request, res: Response) => {
   });
 });
 
-const extractDescription = (desc: any): string => {
-  if (!desc) return ""
-  if (typeof desc === "string") return desc
-  if (Array.isArray(desc)) return desc.join(" ")
-  if (desc.content) {
-    const parts: string[] = []
-    const walk = (nodes: any[]): void => {
-      nodes.forEach((node: any) => {
-        if (node.text) parts.push(node.text)
-        if (node.content) walk(node.content)
-      })
-    }
-    walk(desc.content)
-    return parts.join(" ").trim()
-  }
-  return ""
-}
-
-// Jira routes moved to api/issues.ts and api/projects.ts
-
-// Jira projects route moved to api/projects.ts
-
 // ============ ASANA API Endpoints ============
 app.get("/api/asana/issues", async (req: Request, res: Response) => {
   // Get project ID from query parameter or use default from env
@@ -491,6 +487,111 @@ app.get('/api/asana/projects', async (_req: Request, res: Response) => {
   } catch (err) {
     console.error('[Asana Projects]', err)
     return res.status(500).json({ error: 'Failed to fetch Asana projects', details: err instanceof Error ? err.message : 'Unknown' })
+  }
+})
+
+// ============ JIRA API Routes ============
+app.get("/api/issues", async (req: Request, res: Response) => {
+  const projectKey = (req.query.projectKey as string) || PROJECT_KEY
+
+  console.log('[/api/issues] Request for project:', projectKey, 'Auth ready:', !!auth)
+
+  if (!projectKey) {
+    return res.status(400).json({ error: "Project key is required" })
+  }
+
+  if (!isJiraConfigReady) {
+    console.error('[/api/issues] Jira not configured')
+    return res.status(500).json({ error: "Jira configuration missing" })
+  }
+
+  try {
+    const jql = `project = "${projectKey}"`
+    // Use correct Jira Cloud API v3 endpoint format
+    const url = `https://${DOMAIN}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=500&fields=key,summary,created,duedate,description,priority,status,assignee,issuetype`
+    
+    console.log('[Jira Request] URL:', url)
+    console.log('[Jira Request] Auth header set:', !!auth)
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    })
+
+    console.log('[Jira Response] Status:', response.status)
+
+    if (!response.ok) {
+      const text = await response.text()
+      console.error('[Jira Error] Status:', response.status, 'Response:', text.substring(0, 200))
+      return res.status(response.status).json({ error: 'Failed to fetch Jira issues', status: response.status, details: text })
+    }
+
+    const data = await response.json() as any
+    const issues = (data.issues || []).map((issue: any) => {
+      const fields = issue.fields || {}
+      const created = fields.created || null
+      const due = fields.duedate || null
+      const duration = created && due ? Math.ceil((new Date(due).getTime() - new Date(created).getTime()) / MS_PER_DAY) : ""
+
+      return {
+        key: issue.key || "-",
+        issueType: fields.issuetype?.name || "-",
+        summary: fields.summary || "-",
+        description: extractDescription(fields.description),
+        priority: fields.priority?.name || "-",
+        status: fields.status?.name || "-",
+        assignee: fields.assignee?.displayName || "Unassigned",
+        team: TEAM_FIELD && fields[TEAM_FIELD] ? String(fields[TEAM_FIELD]) : "Team 1",
+        created,
+        due,
+        duration,
+      }
+    })
+
+    res.json({ issues })
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch Jira issues", details: err instanceof Error ? err.message : "Unknown error" })
+  }
+})
+
+app.get('/api/projects', async (_req: Request, res: Response) => {
+  if (!isJiraConfigReady || !DOMAIN) {
+    return res.status(500).json({ error: 'Jira configuration missing' })
+  }
+
+  try {
+    const response = await fetch(`https://${DOMAIN}/rest/api/2/project?maxResults=200`, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        Accept: 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      const txt = await response.text()
+      return res.status(response.status).json({ error: 'Failed to fetch projects', details: txt })
+    }
+
+    const data = await response.json() as any
+    // Jira API v2 /project returns a direct array
+    const projectArray = Array.isArray(data) ? data : (data.values || data.projects || [])
+    const projects = projectArray.map((p: any) => ({
+      id: p.key || String(p.id),
+      key: p.key || String(p.id),
+      title: p.name || p.key || String(p.id),
+      category: p.projectTypeKey || 'Project',
+      description: p.description ? (typeof p.description === 'string' ? p.description : '') : '',
+      avatar: p.avatarUrls?.['48x48'] || '',
+    }))
+    
+    console.log('[/api/projects] Returning', projects.length, 'projects')
+    res.json({ projects })
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch Jira projects', details: err instanceof Error ? err.message : 'Unknown' })
   }
 })
 
